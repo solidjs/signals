@@ -136,7 +136,7 @@ export function catchError<T, U = Error>(
   handler: (error: U) => void
 ): void {
   const owner = new OwnerNode();
-  owner._context = { [HANDLER]: handler };
+  owner._handlers = [handler, ...owner._handlers];
   try {
     compute(owner, fn, null);
   } catch (error) {
@@ -190,6 +190,7 @@ function disposeNode(node: Computation) {
   node._observers = null;
   node._prevSibling = null;
   node._context = null;
+  node._handlers = null;
 }
 
 function emptyDisposal(owner: Computation) {
@@ -224,31 +225,20 @@ export function compute<Result>(
   }
 }
 
-function lookup(owner: Owner | null, key: string | symbol): any {
-  if (!owner) return;
-
-  let current: Owner | null = owner,
-    value;
-
-  while (current) {
-    value = current._context?.[key];
-    if (value !== undefined) return value;
-    current = current._parent;
+function handleError(owner: Owner | null, error: unknown) {
+  if (!owner || !owner._handlers!.length) throw error;
+  let coercedError = coerceError(error);
+  for (const handler of owner._handlers!) {
+    try {
+      handler(coercedError);
+    } catch (error) {
+      coercedError = coerceError(error);
+    }
   }
 }
 
-function handleError(owner: Owner | null, error: unknown) {
-  const handler = lookup(owner, HANDLER);
-
-  if (!handler) throw error;
-
-  try {
-    const coercedError =
-      error instanceof Error ? error : Error(JSON.stringify(error));
-    handler(coercedError);
-  } catch (error) {
-    handleError(owner!._parent, error);
-  }
+function coerceError(error: unknown): Error {
+  return error instanceof Error ? error : Error(JSON.stringify(error));
 }
 
 export function read(this: Computation): any {
@@ -293,13 +283,16 @@ const OwnerNode = function Owner(this: Owner) {
 };
 
 const OwnerProto = OwnerNode.prototype;
-OwnerProto._context = null;
+OwnerProto._context = {};
+OwnerProto._handlers = [];
 OwnerProto._compute = null;
 OwnerProto._disposal = null;
 
 OwnerProto.append = function appendChild(owner: Owner) {
   owner._parent = this;
   owner._prevSibling = this;
+  owner._context = this._context;
+  owner._handlers = this._handlers;
   if (this._nextSibling) this._nextSibling._prevSibling = owner;
   owner._nextSibling = this._nextSibling;
   this._nextSibling = owner;
@@ -326,7 +319,8 @@ const ComputeNode = function Computation(
   this._value = initialValue;
 
   if (compute) this._compute = compute;
-  if (__DEV__) this.name = options?.name ?? (this._compute ? "computed" : "signal");
+  if (__DEV__)
+    this.name = options?.name ?? (this._compute ? "computed" : "signal");
   if (options && options.equals !== undefined) this._equals = options.equals;
 };
 
@@ -342,6 +336,27 @@ export function createComputation<T>(
   options?: MemoOptions<T>
 ): Computation<T> {
   return new ComputeNode(initialValue, compute, options);
+}
+/**
+ * Attempts to get a context value for the given key. It will start from the owner and
+ * walk up the computation tree trying to find a context record and matching key. If no value can
+ * be found `undefined` will be returned.
+ *
+ * @see {@link https://github.com/solidjs/x-reactivity#getcontext}
+ */
+export function getContext<T>(key: string | symbol): T | undefined {
+  return currentOwner?._context![key] as T | undefined;
+}
+
+/**
+ * Attempts to set a context value on the owner with the given key. This will be a no-op if
+ * no parent is defined.
+ *
+ * @see {@link https://github.com/solidjs/x-reactivity#setcontext}
+ */
+export function setContext<T>(key: string | symbol, value: T) {
+  if (currentOwner)
+    currentOwner._context = { ...currentOwner._context, [key]: value };
 }
 
 export function isEqual(a: unknown, b: unknown) {
@@ -373,7 +388,7 @@ function cleanup(node: Computation) {
   if (node._nextSibling && node._nextSibling._parent === node)
     dispose.call(node, false);
   if (node._disposal) emptyDisposal(node);
-  node._context = null;
+  node._handlers = node._parent?._handlers || [];
 }
 
 export function update(node: Computation) {

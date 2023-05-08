@@ -6,6 +6,8 @@ export {
   flushSync,
   getOwner,
   runWithOwner,
+  getContext,
+  setContext,
 } from "./core";
 export { createMemo, createSignal, createEffect } from "./signals";
 export type { Accessor, Setter, Signal } from "./types";

@@ -68,6 +68,8 @@ export interface Owner {
   /** @internal */
   _context: ContextRecord | null;
   /** @internal */
+  _handlers: ErrorHandler[] | null;
+  /** @internal */
   _disposal: Disposable | Disposable[] | null;
   append(owner: Owner): void;
 }
@@ -87,3 +89,7 @@ export type MaybeFunction = Maybe<(...args: any) => any>;
 export type MaybeDisposable = Maybe<Disposable>;
 export type MaybeSignal<T> = MaybeFunction | Accessor<T>;
 export type ContextRecord = Record<string | symbol, unknown>;
+
+export interface ErrorHandler<T = Error> {
+  (error: T): void;
+}
