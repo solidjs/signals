@@ -225,15 +225,23 @@ export function compute<Result>(
 }
 
 function handleError(owner: Owner | null, error: unknown) {
-  if (!owner || !owner._handlers!.length) throw error;
-  let coercedError = coerceError(error);
-  for (const handler of owner._handlers!) {
+  if (!owner) throw error;
+
+  let i = 0,
+    len = owner._handlers!.length,
+    coercedError = coerceError(error);
+
+  for (i = 0; i < len; i++) {
     try {
-      handler(coercedError);
+      owner._handlers![i](coercedError);
+      break; // error was handled.
     } catch (error) {
       coercedError = coerceError(error);
     }
   }
+
+  // Error was not handled.
+  if (i === len) throw coercedError;
 }
 
 function coerceError(error: unknown): Error {

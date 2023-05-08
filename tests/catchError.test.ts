@@ -28,6 +28,21 @@ it("should handle error", () => {
   expect(handler).toHaveBeenCalledWith(error);
 });
 
+it("should throw error if there are no handlers left", () => {
+  const error = new Error(),
+    handler = vi.fn((e) => {
+      throw e;
+    });
+
+  expect(() => {
+    catchError(() => {
+      throw error;
+    }, handler);
+  }).toThrow(error);
+
+  expect(handler).toHaveBeenCalledWith(error);
+});
+
 it("should forward error to another handler", () => {
   const error = new Error(),
     rootHandler = vi.fn();
