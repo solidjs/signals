@@ -15,8 +15,7 @@ let scheduledEffects = false,
   currentObserversIndex = 0,
   effects: Computation[] = [];
 
-const HANDLER = Symbol(__DEV__ ? "ERROR_HANDLER" : 0),
-  // For more information about this graph tracking scheme see Reactively:
+const // For more information about this graph tracking scheme see Reactively:
   // https://github.com/modderme123/reactively/blob/main/packages/core/src/core.ts#L21
   STATE_CLEAN = 0,
   STATE_CHECK = 1,
