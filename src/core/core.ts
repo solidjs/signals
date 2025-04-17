@@ -50,7 +50,7 @@ interface SourceType {
 
 interface ObserverType {
   _sources: SourceType[] | null;
-  _notify: (state: number, skipQueue?: boolean) => void;
+  _notify: (state: number) => void;
 
   _handlerMask: Flags;
   _notifyFlags: (mask: Flags, newFlags: Flags) => void;
@@ -228,19 +228,18 @@ export class Computation<T = any> extends Owner implements SourceType, ObserverT
   /**
    * Set the current node's state, and recursively mark all of this node's observers as STATE_CHECK
    */
-  _notify(state: number, skipQueue?: boolean): void {
+  _notify(state: number): void {
     // If the state is already STATE_DIRTY and we are trying to set it to STATE_CHECK,
     // then we don't need to do anything. Similarly, if the state is already STATE_CHECK
     // and we are trying to set it to STATE_CHECK, then we don't need to do anything because
     // a previous _notify call has already set this state and all observers as STATE_CHECK
-    if (this._state >= state && !this._forceNotify) return;
+    if (this._state >= state) return;
 
-    this._forceNotify = !!skipQueue;
     this._state = state;
 
     if (this._observers) {
       for (let i = 0; i < this._observers.length; i++) {
-        this._observers[i]._notify(STATE_CHECK, skipQueue);
+        this._observers[i]._notify(STATE_CHECK);
       }
     }
   }

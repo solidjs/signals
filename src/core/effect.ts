@@ -12,6 +12,7 @@ import { ERROR_BIT, LOADING_BIT } from "./flags.js";
 import { getClock } from "./scheduler.js";
 import type { SuspenseQueue } from "./suspense.js";
 
+let skipQueue = false;
 /**
  * Effects are the leaf nodes of our reactive graph. When their sources change, they are
  * automatically added to the queue of effects to re-execute, which will cause them to fetch their
@@ -123,12 +124,12 @@ export class EagerComputation<T = any> extends Computation<T> {
       console.warn("Eager Computations created outside a reactive context will never be disposed");
   }
 
-  override _notify(state: number, skipQueue?: boolean): void {
-    if (this._state >= state && !this._forceNotify) return;
+  override _notify(state: number): void {
+    if (this._state >= state) return;
 
     if (this._state === STATE_CLEAN && !skipQueue) this._queue.enqueue(EFFECT_PURE, this);
 
-    super._notify(state, skipQueue);
+    super._notify(state);
   }
 }
 
@@ -138,11 +139,14 @@ export class ProjectionComputation extends Computation {
     if (__DEV__ && !this._parent)
       console.warn("Eager Computations created outside a reactive context will never be disposed");
   }
-  _notify(state: number, skipQueue?: boolean): void {
-    if (this._state >= state && !this._forceNotify) return;
+  _notify(state: number): void {
+    if (this._state >= state) return;
 
     if (this._state === STATE_CLEAN && !skipQueue) this._queue.enqueue(EFFECT_PURE, this);
 
-    super._notify(state, true);
+    let prevSkipQueue = skipQueue;
+    skipQueue = true;
+    super._notify(state);
+    skipQueue = prevSkipQueue;
   }
 }
