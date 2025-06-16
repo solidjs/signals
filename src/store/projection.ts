@@ -28,7 +28,7 @@ export function wrapProjection<T>(
 
 function wrap(source, node, wrapped) {
   if (wrapped.has(source)) return wrapped.get(source);
-  const wrap = new Proxy(source, {
+  const innerWrap = new Proxy(source, {
     get(target, property) {
       node.read();
       const v = target[property];
@@ -41,6 +41,6 @@ function wrap(source, node, wrapped) {
       throw new Error("Projections are readonly");
     }
   });
-  wrapped.set(source, wrap);
-  return wrap;
+  wrapped.set(source, innerWrap);
+  return innerWrap;
 }
