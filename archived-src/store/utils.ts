@@ -1,5 +1,4 @@
-import { SUPPORTS_PROXY } from "../core/index.js";
-import { createMemo } from "../signals.js";
+import { SUPPORTS_PROXY, createMemo } from "../core/index.js";
 import { $PROXY } from "./store.js";
 
 function trueFn() {

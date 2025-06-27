@@ -1,4 +1,5 @@
-import { EFFECT_PURE, EFFECT_RENDER, EFFECT_USER } from "./constants.js";
+import { EFFECT_RENDER, EFFECT_USER } from "./constants.js";
+import { stabilize as r3Stabilize } from "./r3.js";
 
 let clock = 0;
 export function getClock() {
@@ -9,7 +10,8 @@ export function incrementClock(): void {
 }
 
 let scheduled = false;
-function schedule() {
+export function stabilize() {
+  r3Stabilize();
   if (scheduled) return;
   scheduled = true;
   if (!globalQueue._running) queueMicrotask(flushSync);
@@ -27,7 +29,6 @@ export interface IQueue {
   _parent: IQueue | null;
 }
 
-let pureQueue: QueueCallback[] = [];
 export class Queue implements IQueue {
   _parent: IQueue | null = null;
   _running: boolean = false;
@@ -35,18 +36,12 @@ export class Queue implements IQueue {
   _children: IQueue[] = [];
   created = clock;
   enqueue(type: number, fn: QueueCallback): void {
-    pureQueue.push(fn);
-    if (type) this._queues[type - 1].push(fn);
-    schedule();
+    this._queues[type].push(fn);
   }
   run(type: number) {
-    if (type === EFFECT_PURE) {
-      pureQueue.length && runQueue(pureQueue, type);
-      pureQueue = [];
-      return;
-    } else if (this._queues[type - 1].length) {
-      const effects = this._queues[type - 1];
-      this._queues[type - 1] = [];
+    if (this._queues[type].length) {
+      const effects = this._queues[type];
+      this._queues[type] = [];
       runQueue(effects, type);
     }
     for (let i = 0; i < this._children.length; i++) {
@@ -57,7 +52,7 @@ export class Queue implements IQueue {
     if (this._running) return;
     this._running = true;
     try {
-      this.run(EFFECT_PURE);
+      r3Stabilize();
       incrementClock();
       scheduled = false;
       this.run(EFFECT_RENDER);

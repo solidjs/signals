@@ -1,4 +1,4 @@
-import { Computation, getObserver, isEqual, untrack } from "../core/index.js";
+import { Computation, getObserver, isEqual } from "../core/index.js";
 import { wrapProjection } from "./projection.js";
 
 export type Store<T> = Readonly<T>;

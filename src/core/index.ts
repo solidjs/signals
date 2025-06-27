@@ -1,30 +1,42 @@
 export { ContextNotFoundError, NoOwnerError, NotReadyError } from "./error.js";
 export {
-  Owner,
+  createRoot,
   createContext,
   getContext,
   setContext,
-  hasContext,
   getOwner,
-  onCleanup,
+  getObserver,
+  runWithOwner,
+  runWithObserver,
   type Context,
   type ContextRecord,
-  type Disposable
+  type Owner
 } from "./owner.js";
 export {
-  Computation,
-  getObserver,
+  createSignal,
+  createMemo,
+  createAsync,
+  createEffect,
+  createRenderEffect,
+  onCleanup,
   isEqual,
   untrack,
   hasUpdated,
   isPending,
   latest,
-  UNCHANGED,
-  compute,
-  runWithObserver,
-  type SignalOptions
+  resolve,
+  tryCatch,
+  type Accessor,
+  type Setter,
+  type Signal,
+  type ComputeFunction,
+  type EffectFunction,
+  type EffectOptions,
+  type SignalOptions,
+  type MemoOptions,
+  type Disposable,
+  type NoInfer
 } from "./core.js";
-export { Effect, EagerComputation } from "./effect.js";
 export { flushSync, Queue, incrementClock, getClock, type IQueue } from "./scheduler.js";
 export * from "./constants.js";
 export * from "./flags.js";

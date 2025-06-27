@@ -1,530 +1,319 @@
-/**
- * Nodes for constructing a graph of reactive values and reactive computations.
- *
- * - The graph is acyclic.
- * - The user inputs new values into the graph by calling .write() on one more computation nodes.
- * - The user retrieves computed results from the graph by calling .read() on one or more computation nodes.
- * - The library is responsible for running any necessary computations so that .read() is up to date
- *   with all prior .write() calls anywhere in the graph.
- * - We call the input nodes 'roots' and the output nodes 'leaves' of the graph here.
- * - Changes flow from roots to leaves. It would be effective but inefficient to immediately
- *   propagate all changes from a root through the graph to descendant leaves. Instead, we defer
- *   change most change propagation computation until a leaf is accessed. This allows us to
- *   coalesce computations and skip altogether recalculating unused sections of the graph.
- * - Each computation node tracks its sources and its observers (observers are other
- *   elements that have this node as a source). Source and observer links are updated automatically
- *   as observer computations re-evaluate and call get() on their sources.
- * - Each node stores a cache state (clean/check/dirty) to support the change propagation algorithm:
- *
- * In general, execution proceeds in three passes:
- *
- *  1. write() propagates changes down the graph to the leaves
- *     direct children are marked as dirty and their deeper descendants marked as check
- *     (no computations are evaluated)
- *  2. read() requests that parent nodes updateIfNecessary(), which proceeds recursively up the tree
- *     to decide whether the node is clean (parents unchanged) or dirty (parents changed)
- *  3. updateIfNecessary() evaluates the computation if the node is dirty (the computations are
- *     executed in root to leaf order)
- */
-
-import { STATE_CHECK, STATE_CLEAN, STATE_DIRTY, STATE_DISPOSED } from "./constants.js";
+import { effect } from "./effect.js";
 import { NotReadyError } from "./error.js";
-import { DEFAULT_FLAGS, ERROR_BIT, LOADING_BIT, UNINITIALIZED_BIT, type Flags } from "./flags.js";
-import { getOwner, Owner, setOwner } from "./owner.js";
-import { getClock } from "./scheduler.js";
+import { createRoot, getNextChildId, getOwner } from "./owner.js";
+import { stabilize } from "./scheduler.js";
+import {
+  asyncComputed,
+  computed,
+  dispose,
+  read,
+  setSignal,
+  signal,
+  untrack,
+  type AsyncSignal,
+  type Computed,
+  type SignalOptions as R3SignalOptions
+} from "./r3.js";
 
-export interface SignalOptions<T> {
+export { onCleanup, untrack, isEqual, type Disposable } from "./r3.js";
+
+export interface SignalOptions<T> extends R3SignalOptions<T> {
   id?: string;
   name?: string;
-  equals?: ((prev: T, next: T) => boolean) | false;
-  unobserved?: () => void;
 }
 
-interface SourceType {
-  _observers: ObserverType[] | null;
-  _unobserved?: () => void;
-  _updateIfNecessary: () => void;
+export type Accessor<T> = () => T;
 
-  _stateFlags: Flags;
-  _time: number;
+export type Setter<in out T> = {
+  <U extends T>(
+    ...args: undefined extends T ? [] : [value: Exclude<U, Function> | ((prev: T) => U)]
+  ): undefined extends T ? undefined : U;
+  <U extends T>(value: (prev: T) => U): U;
+  <U extends T>(value: Exclude<U, Function>): U;
+  <U extends T>(value: Exclude<U, Function> | ((prev: T) => U)): U;
+};
+
+export type Signal<T> = [get: Accessor<T>, set: Setter<T>];
+
+export type ComputeFunction<Prev, Next extends Prev = Prev> = (v: Prev) => Next;
+export type EffectFunction<Prev, Next extends Prev = Prev> = (
+  err: unknown,
+  v: Next,
+  p?: Prev
+) => (() => void) | void;
+export type RenderEffectFunction<Prev, Next extends Prev = Prev> = (
+  v: Next,
+  p?: Prev
+) => (() => void) | void;
+
+export interface EffectOptions {
+  name?: string;
+  defer?: boolean;
+}
+export interface MemoOptions<T> {
+  name?: string;
+  equals?: false | ((prev: T, next: T) => boolean);
 }
 
-interface ObserverType {
-  _sources: SourceType[] | null;
-  _notify: (state: number, skipQueue?: boolean) => void;
-
-  _handlerMask: Flags;
-  _notifyFlags: (mask: Flags, newFlags: Flags) => void;
-  _time: number;
-}
-
-let currentObserver: ObserverType | null = null,
-  currentMask: Flags = DEFAULT_FLAGS,
-  newSources: SourceType[] | null = null,
-  newSourcesIndex = 0,
-  newFlags = 0,
-  notStale = false,
-  updateCheck: null | { _value: boolean } = null,
-  staleCheck: null | { _value: boolean } = null;
+// Magic type that when used at sites where generic types are inferred from, will prevent those sites from being involved in the inference.
+// https://github.com/microsoft/TypeScript/issues/14829
+// TypeScript Discord conversation: https://discord.com/channels/508357248330760243/508357248330760249/911266491024949328
+export type NoInfer<T extends any> = [T][T extends any ? 0 : never];
 
 /**
- * Returns the current observer.
+ * Creates a simple reactive state with a getter and setter
+ * ```typescript
+ * const [state: Accessor<T>, setState: Setter<T>] = createSignal<T>(
+ *  value: T,
+ *  options?: { name?: string, equals?: false | ((prev: T, next: T) => boolean) }
+ * )
+ * ```
+ * @param value initial value of the state; if empty, the state's type will automatically extended with undefined; otherwise you need to extend the type manually if you want setting to undefined not be an error
+ * @param options optional object with a name for debugging purposes and equals, a comparator function for the previous and next value to allow fine-grained control over the reactivity
+ *
+ * @returns ```typescript
+ * [state: Accessor<T>, setState: Setter<T>]
+ * ```
+ * * the Accessor is a function that returns the current value and registers each call to the reactive root
+ * * the Setter is a function that allows directly setting or mutating the value:
+ * ```typescript
+ * const [count, setCount] = createSignal(0);
+ * setCount(count => count + 1);
+ * ```
+ *
+ * @description https://docs.solidjs.com/reference/basic-reactivity/create-signal
  */
-export function getObserver(): Computation | null {
-  return currentObserver as Computation | null;
-}
-
-export const UNCHANGED: unique symbol = Symbol(__DEV__ ? "unchanged" : 0);
-export type UNCHANGED = typeof UNCHANGED;
-
-export class Computation<T = any> extends Owner implements SourceType, ObserverType {
-  _sources: SourceType[] | null = null;
-  _observers: ObserverType[] | null = null;
-  _value: T | undefined;
-  _error: unknown;
-  _compute: null | ((p?: T) => T);
-
-  // Used in __DEV__ mode, hopefully removed in production
-  _name: string | undefined;
-
-  // Using false is an optimization as an alternative to _equals: () => false
-  // which could enable more efficient DIRTY notification
-  _equals: false | ((a: T, b: T) => boolean) = isEqual;
-  _unobserved: (() => void) | undefined;
-
-  /** Whether the computation is an error or has ancestors that are unresolved */
-  _stateFlags = 0;
-
-  /** Which flags raised by sources are handled, vs. being passed through. */
-  _handlerMask = DEFAULT_FLAGS;
-
-  _time: number = -1;
-  _forceNotify = false;
-
-  constructor(
-    initialValue: T | undefined,
-    compute: null | ((p?: T) => T),
-    options?: SignalOptions<T>
-  ) {
-    // Initialize self as a node in the Owner tree, for tracking cleanups.
-    // If we aren't passed a compute function, we don't need to track nested computations
-    // because there is no way to create a nested computation (a child to the owner tree)
-    super(options?.id, compute === null);
-
-    this._compute = compute;
-
-    this._state = compute ? STATE_DIRTY : STATE_CLEAN;
-    this._stateFlags = compute && initialValue === undefined ? UNINITIALIZED_BIT : 0;
-    this._value = initialValue;
-
-    // Used when debugging the graph; it is often helpful to know the names of sources/observers
-    if (__DEV__) this._name = options?.name ?? (this._compute ? "computed" : "signal");
-
-    if (options?.equals !== undefined) this._equals = options.equals;
-
-    if (options?.unobserved) this._unobserved = options?.unobserved;
+export function createSignal<T>(): Signal<T | undefined>;
+export function createSignal<T>(value: Exclude<T, Function>, options?: SignalOptions<T>): Signal<T>;
+export function createSignal<T>(
+  fn: ComputeFunction<T>,
+  initialValue?: T,
+  options?: SignalOptions<T>
+): Signal<T>;
+export function createSignal<T>(
+  first?: T | ComputeFunction<T>,
+  second?: T | SignalOptions<T>,
+  third?: SignalOptions<T>
+): Signal<T | undefined> {
+  if (typeof first === "function") {
+    const memo = createMemo<Signal<T>>(p => {
+      const node = signal<T>((first as (prev?: T) => T)(p ? untrack(p[0]) : (second as T)), third);
+      return [() => read(node), v => setSignal(node, v)] as Signal<T>;
+    });
+    return [() => memo()[0](), (value => memo()[1](value)) as Setter<T | undefined>];
   }
-
-  _read(): T {
-    if (this._compute) {
-      if (this._stateFlags & ERROR_BIT && this._time <= getClock()) update(this);
-      else this._updateIfNecessary();
-    }
-
-    // When the currentObserver reads this._value, the want to add this computation as a source
-    // so that when this._value changes, the currentObserver will be re-executed
-    track(this);
-
-    // TODO do a handler lookup instead
-    newFlags |= this._stateFlags & ~currentMask;
-
-    if (this._stateFlags & ERROR_BIT) {
-      throw this._error as Error;
-    } else {
-      return this._value!;
-    }
-  }
-
-  /**
-   * Return the current value of this computation
-   * Automatically re-executes the surrounding computation when the value changes
-   */
-  read(): T {
-    return this._read();
-  }
-
-  /**
-   * Return the current value of this computation
-   * Automatically re-executes the surrounding computation when the value changes
-   *
-   * If the computation has any unresolved ancestors, this function waits for the value to resolve
-   * before continuing
-   */
-  wait(): T {
-    if (this._compute && this._stateFlags & ERROR_BIT && this._time <= getClock()) {
-      update(this);
-    } else {
-      this._updateIfNecessary();
-    }
-
-    track(this);
-
-    if ((notStale || this._stateFlags & UNINITIALIZED_BIT) && this._stateFlags & LOADING_BIT) {
-      throw new NotReadyError();
-    }
-
-    if (staleCheck && this._stateFlags & LOADING_BIT) {
-      staleCheck._value = true;
-    }
-
-    return this._read();
-  }
-
-  /** Update the computation with a new value. */
-  write(
-    value: T | ((currentValue: T) => T) | UNCHANGED,
-    flags = 0,
-    // Tracks whether a function was returned from a compute result so we don't unwrap it.
-    raw = false
-  ): T {
-    const newValue =
-      !raw && typeof value === "function"
-        ? (value as (currentValue: T) => T)(this._value!)
-        : (value as T);
-
-    const valueChanged =
-      newValue !== UNCHANGED &&
-      (!!(this._stateFlags & UNINITIALIZED_BIT) ||
-        this._stateFlags & LOADING_BIT & ~flags ||
-        this._equals === false ||
-        !this._equals(this._value!, newValue));
-
-    if (valueChanged) {
-      this._value = newValue;
-      this._error = undefined;
-    }
-
-    const changedFlagsMask = this._stateFlags ^ flags,
-      changedFlags = changedFlagsMask & flags;
-
-    this._stateFlags = flags;
-    this._time = getClock() + 1;
-
-    // Our value has changed, so we need to notify all of our observers that the value has
-    // changed and so they must rerun
-    if (this._observers) {
-      for (let i = 0; i < this._observers.length; i++) {
-        if (valueChanged) {
-          this._observers[i]._notify(STATE_DIRTY);
-        } else if (changedFlagsMask) {
-          this._observers[i]._notifyFlags(changedFlagsMask, changedFlags);
-        }
-      }
-    }
-
-    // We return the value so that .write can be used in an expression
-    // (although it is not usually recommended)
-    return this._value!;
-  }
-
-  /**
-   * Set the current node's state, and recursively mark all of this node's observers as STATE_CHECK
-   */
-  _notify(state: number, skipQueue?: boolean): void {
-    // If the state is already STATE_DIRTY and we are trying to set it to STATE_CHECK,
-    // then we don't need to do anything. Similarly, if the state is already STATE_CHECK
-    // and we are trying to set it to STATE_CHECK, then we don't need to do anything because
-    // a previous _notify call has already set this state and all observers as STATE_CHECK
-    if (this._state >= state && !this._forceNotify) return;
-
-    this._forceNotify = !!skipQueue;
-    this._state = state;
-
-    if (this._observers) {
-      for (let i = 0; i < this._observers.length; i++) {
-        this._observers[i]._notify(STATE_CHECK, skipQueue);
-      }
-    }
-  }
-
-  /**
-   * Notify the computation that one of its sources has changed flags.
-   *
-   * @param mask A bitmask for which flag(s) were changed.
-   * @param newFlags The source's new flags, masked to just the changed ones.
-   */
-  _notifyFlags(mask: Flags, newFlags: Flags): void {
-    // If we're dirty, none of the things we do can matter.
-    if (this._state >= STATE_DIRTY) return;
-
-    // If the changed flags have side effects attached, we have to re-run.
-    if (mask & this._handlerMask) {
-      this._notify(STATE_DIRTY);
-      return;
-    }
-
-    // If we're already check, we can delay this propagation until we check.
-    if (this._state >= STATE_CHECK) return;
-
-    // If we're clean, and none of these flags have a handler, we can try to
-    // propagate them.
-    const prevFlags = this._stateFlags & mask;
-    const deltaFlags = prevFlags ^ newFlags;
-
-    if (newFlags === prevFlags) {
-      // No work to do if the flags are unchanged.
-    } else if (deltaFlags & prevFlags & mask) {
-      // One of the changed flags was previously _on_, so we can't eagerly
-      // propagate anything; we'll wait until we're checked.
-      this._notify(STATE_CHECK);
-    } else {
-      // The changed flags were previously _off_, which means we can remain
-      // clean with updated flags and pass this notification on transitively.
-      this._stateFlags ^= deltaFlags;
-      if (this._observers) {
-        for (let i = 0; i < this._observers.length; i++) {
-          this._observers[i]._notifyFlags(mask, newFlags);
-        }
-      }
-    }
-  }
-
-  _setError(error: unknown): void {
-    this._error = error;
-    this.write(UNCHANGED, (this._stateFlags & ~LOADING_BIT) | ERROR_BIT | UNINITIALIZED_BIT);
-  }
-
-  /**
-   * This is the core part of the reactivity system, which makes sure that the values are updated
-   * before they are read. We've also adapted it to return the loading state of the computation,
-   * so that we can propagate that to the computation's observers.
-   *
-   * This function will ensure that the value and states we read from the computation are up to date
-   */
-  _updateIfNecessary(): void {
-    if (!this._compute) {
-      return;
-    }
-
-    // If the user tries to read a computation that has been disposed, we throw an error, because
-    // they probably kept a reference to it as the parent reran, so there is likely a new computation
-    // with the same _compute function that they should be reading instead.
-    if (this._state === STATE_DISPOSED) {
-      return;
-      // throw new Error("Tried to read a disposed computation");
-    }
-
-    // If the computation is already clean, none of our sources have changed, so we know that
-    // our value and stateFlags are up to date, and we can just return.
-    if (this._state === STATE_CLEAN) {
-      return;
-    }
-
-    // Otherwise, our sources' values may have changed, or one of our sources' loading states
-    // may have been set to no longer loading. In either case, what we need to do is make sure our
-    // sources all have up to date values and loading states and then update our own value and
-    // loading state
-
-    // We keep track of whether any of our sources have changed loading state so that we can update
-    // our loading state. This is only necessary if none of them change value because update() will
-    // also cause us to recompute our loading state.
-    let observerFlags: Flags = 0;
-
-    // STATE_CHECK means one of our grandparent sources may have changed value or loading state,
-    // so we need to recursively call _updateIfNecessary to update the state of all of our sources
-    // and then update our value and loading state.
-    if (this._state === STATE_CHECK) {
-      for (let i = 0; i < this._sources!.length; i++) {
-        // Make sure the parent is up to date. If it changed value, then it will mark us as
-        // STATE_DIRTY, and we will know to rerun
-        this._sources![i]._updateIfNecessary();
-
-        // If the parent is loading, then we are waiting
-        observerFlags |= this._sources![i]._stateFlags;
-
-        // If the parent changed value, it will mark us as STATE_DIRTY and we need to call update()
-        // Cast because the _updateIfNecessary call above can change our state
-        if ((this._state as number) === STATE_DIRTY) {
-          // Stop the loop here so we won't trigger updates on other parents unnecessarily
-          // If our computation changes to no longer use some sources, we don't
-          // want to update() a source we used last time, but now don't use.
-          break;
-        }
-      }
-    }
-
-    if (this._state === STATE_DIRTY) {
-      update(this);
-    } else {
-      // isWaiting has now coallesced all of our parents' loading states
-      this.write(UNCHANGED, observerFlags);
-
-      // None of our parents changed value, so our value is up to date (STATE_CLEAN)
-      this._state = STATE_CLEAN;
-    }
-  }
-
-  /**
-   * Remove ourselves from the owner graph and the computation graph
-   */
-  override _disposeNode(): void {
-    // If we've already been disposed, don't try to dispose twice
-    if (this._state === STATE_DISPOSED) return;
-
-    // Unlink ourselves from our sources' observers array so that we can be garbage collected
-    // This removes us from the computation graph
-    if (this._sources) removeSourceObservers(this, 0);
-
-    // Remove ourselves from the ownership tree as well
-    super._disposeNode();
-  }
+  const o = getOwner();
+  const needsId = o?.id != null;
+  const node = signal(
+    first as T,
+    needsId ? { id: getNextChildId(o), ...second } : (second as SignalOptions<T>)
+  );
+  return [() => read(node), (v => setSignal(node, v)) as Setter<T | undefined>];
 }
 
 /**
- * Instead of wiping the sources immediately on `update`, we compare them to the new sources
- * by checking if the source we want to add is the same as the old source at the same index.
+ * Creates a readonly derived reactive memoized signal
+ * ```typescript
+ * export function createMemo<T>(
+ *   compute: (v: T) => T,
+ *   value?: T,
+ *   options?: { name?: string, equals?: false | ((prev: T, next: T) => boolean) }
+ * ): () => T;
+ * ```
+ * @param compute a function that receives its previous or the initial value, if set, and returns a new value used to react on a computation
+ * @param value an optional initial value for the computation; if set, fn will never receive undefined as first argument
+ * @param options allows to set a name in dev mode for debugging purposes and use a custom comparison function in equals
  *
- * This way when the sources don't change, we are just doing a fast comparison:
- *
- * _sources: [a, b, c]
- *            ^
- *            |
- *      newSourcesIndex
- *
- * When the sources do change, we create newSources and push the values that we read into it
+ * @description https://docs.solidjs.com/reference/basic-reactivity/create-memo
  */
-function track(computation: SourceType): void {
-  if (currentObserver) {
-    if (
-      !newSources &&
-      currentObserver._sources &&
-      currentObserver._sources[newSourcesIndex] === computation
-    ) {
-      newSourcesIndex++;
-    } else if (!newSources) newSources = [computation];
-    else if (computation !== newSources[newSources.length - 1]) {
-      // If the computation is the same as the last source we read, we don't need to add it to newSources
-      // https://github.com/solidjs/solid/issues/46#issuecomment-515717924
-      newSources.push(computation);
+// The extra Prev generic parameter separates inference of the compute input
+// parameter type from inference of the compute return type, so that the effect
+// return type is always used as the memo Accessor's return type.
+export function createMemo<Next extends Prev, Prev = Next>(
+  compute: ComputeFunction<undefined | NoInfer<Prev>, Next>
+): Accessor<Next>;
+export function createMemo<Next extends Prev, Init = Next, Prev = Next>(
+  compute: ComputeFunction<Init | Prev, Next>,
+  value: Init,
+  options?: MemoOptions<Next>
+): Accessor<Next>;
+export function createMemo<Next extends Prev, Init, Prev>(
+  compute: ComputeFunction<Init | Prev, Next>,
+  value?: Init,
+  options?: MemoOptions<Next>
+): Accessor<Next> {
+  let node: Computed<Next> | undefined = computed<Next>(compute as any, value as any, options);
+  let resolvedValue: Next;
+  return () => {
+    if (node) {
+      stabilize();
+      resolvedValue = read(node);
+      // no sources so will never update so can be disposed.
+      // additionally didn't create nested reactivity so can be disposed.
+      if (!node.deps && !node.firstChild) {
+        dispose(node);
+        node = undefined;
+      }
     }
-    if (updateCheck) {
-      updateCheck._value = computation._time > currentObserver._time;
-    }
-  }
+    return resolvedValue;
+  };
 }
 
 /**
- * Reruns a computation's _compute function, producing a new value and keeping track of dependencies.
+ * Creates a readonly derived async reactive memoized signal
+ * ```typescript
+ * export function createAsync<T>(
+ *   compute: (v: T) => Promise<T> | T,
+ *   value?: T,
+ *   options?: { name?: string, equals?: false | ((prev: T, next: T) => boolean) }
+ * ): () => T;
+ * ```
+ * @param compute a function that receives its previous or the initial value, if set, and returns a new value used to react on a computation
+ * @param value an optional initial value for the computation; if set, fn will never receive undefined as first argument
+ * @param options allows to set a name in dev mode for debugging purposes and use a custom comparison function in equals
  *
- * It handles the updating of sources and observers, disposal of previous executions,
- * and error handling if the _compute function throws. It also sets the node as loading
- * if it reads any parents that are currently loading.
+ * @description https://docs.solidjs.com/reference/basic-reactivity/create-async
  */
-export function update<T>(node: Computation<T>): void {
-  const prevSources = newSources,
-    prevSourcesIndex = newSourcesIndex,
-    prevFlags = newFlags;
+export function createAsync<T>(
+  compute: (prev?: T) => Promise<T> | T,
+  value?: T,
+  options?: SignalOptions<T>
+): Accessor<T> {
+  const node: AsyncSignal<T> = asyncComputed<T>(
+    () => compute(node.loaded.value as T),
+    value,
+    options as SignalOptions<any>
+  );
+  return () => {
+    if (read(node.loading)) throw new NotReadyError();
+    return read(node.loaded) as T;
+  };
+}
 
-  newSources = null as Computation[] | null;
-  newSourcesIndex = 0;
-  newFlags = 0;
+/**
+ * Creates a reactive effect that runs after the render phase
+ * ```typescript
+ * export function createEffect<T>(
+ *   compute: (prev: T) => T,
+ *   effect: (err: unknown, v: T, prev: T) => (() => void) | void,
+ *   value?: T,
+ *   options?: { name?: string }
+ * ): void;
+ * ```
+ * @param compute a function that receives its previous or the initial value, if set, and returns a new value used to react on a computation
+ * @param effect a function that receives the new value and is used to perform side effects, return a cleanup function to run on disposal
+ * @param value an optional initial value for the computation; if set, fn will never receive undefined as first argument
+ * @param options allows to set a name in dev mode for debugging purposes
+ *
+ * @description https://docs.solidjs.com/reference/basic-reactivity/create-effect
+ */
+export function createEffect<Next>(
+  compute: ComputeFunction<undefined | NoInfer<Next>, Next>,
+  effect: EffectFunction<NoInfer<Next>, Next>,
+  error?: (err: unknown) => void
+): void;
+export function createEffect<Next, Init = Next>(
+  compute: ComputeFunction<Init | Next, Next>,
+  effect: EffectFunction<Next, Next>,
+  error: ((err: unknown) => void) | undefined,
+  value: Init,
+  options?: EffectOptions
+): void;
+export function createEffect<Next, Init>(
+  compute: ComputeFunction<Init | Next, Next>,
+  effectFn: EffectFunction<Next, Next>,
+  value?: Init,
+  options?: EffectOptions
+): void {
+  effect(
+    compute as any,
+    effectFn,
+    value as any,
+    __DEV__ ? { ...options, name: options?.name ?? "effect" } : options
+  );
+}
 
+/**
+ * Creates a reactive computation that runs during the render phase as DOM elements are created and updated but not necessarily connected
+ * ```typescript
+ * export function createRenderEffect<T>(
+ *   compute: (prev: T) => T,
+ *   effect: (v: T, prev: T) => (() => void) | void,
+ *   value?: T,
+ *   options?: { name?: string }
+ * ): void;
+ * ```
+ * @param compute a function that receives its previous or the initial value, if set, and returns a new value used to react on a computation
+ * @param effect a function that receives the new value and is used to perform side effects
+ * @param value an optional initial value for the computation; if set, fn will never receive undefined as first argument
+ * @param options allows to set a name in dev mode for debugging purposes
+ *
+ * @description https://docs.solidjs.com/reference/secondary-primitives/create-render-effect
+ */
+export function createRenderEffect<Next>(
+  compute: ComputeFunction<undefined | NoInfer<Next>, Next>,
+  effect: RenderEffectFunction<NoInfer<Next>, Next>
+): void;
+export function createRenderEffect<Next, Init = Next>(
+  compute: ComputeFunction<Init | Next, Next>,
+  effect: RenderEffectFunction<Next, Next>,
+  value: Init,
+  options?: EffectOptions
+): void;
+export function createRenderEffect<Next, Init>(
+  compute: ComputeFunction<Init | Next, Next>,
+  effectFn: RenderEffectFunction<Next, Next>,
+  value?: Init,
+  options?: EffectOptions
+): void {
+  effect(compute as any, (e, v, p) => effectFn(v, p), value as any, {
+    render: true,
+    ...(__DEV__ ? { ...options, name: options?.name ?? "rendereffect" } : options)
+  });
+}
+
+/**
+ * Returns a promise of the resolved value of a reactive expression
+ * @param fn a reactive expression to resolve
+ */
+export function resolve<T>(fn: () => T): Promise<T> {
+  return new Promise((res, rej) => {
+    createRoot(dispose => {
+      computed(() => {
+        try {
+          res(fn());
+        } catch (err) {
+          if (err instanceof NotReadyError) throw err;
+          rej(err);
+        }
+        dispose();
+      });
+    });
+  });
+}
+
+export type TryCatchResult<T, E> = [undefined, T] | [E];
+export function tryCatch<T, E = Error>(fn: () => Promise<T>): Promise<TryCatchResult<T, E>>;
+export function tryCatch<T, E = Error>(fn: () => T): TryCatchResult<T, E>;
+export function tryCatch<T, E = Error>(
+  fn: () => T | Promise<T>
+): TryCatchResult<T, E> | Promise<TryCatchResult<T, E>> {
   try {
-    node.dispose(false);
-    node.emptyDisposal();
-
-    // Rerun the node's _compute function, setting node as owner and listener so that any
-    // computations read are added to node's sources and any computations are automatically disposed
-    // if `node` is rerun
-    const result = compute(node, node._compute!, node);
-
-    // Update the node's value
-    node.write(result, newFlags, true);
-  } catch (error) {
-    if (error instanceof NotReadyError) {
-      node.write(UNCHANGED, newFlags | LOADING_BIT | (node._stateFlags & UNINITIALIZED_BIT));
-    } else {
-      node._setError(error);
-    }
-  } finally {
-    if (newSources) {
-      // If there are new sources, that means the end of the sources array has changed
-      // newSourcesIndex keeps track of the index of the first new source
-      // See track() above for more info
-
-      // We need to remove any old sources after newSourcesIndex
-      if (node._sources) removeSourceObservers(node, newSourcesIndex);
-
-      // First we update our own sources array (uplinks)
-      if (node._sources && newSourcesIndex > 0) {
-        // If we shared some sources with the previous execution, we need to copy those over to the
-        // new sources array
-
-        // First we need to make sure the sources array is long enough to hold all the new sources
-        node._sources.length = newSourcesIndex + newSources.length;
-
-        // Then we copy the new sources over
-        for (let i = 0; i < newSources.length; i++) {
-          node._sources[newSourcesIndex + i] = newSources[i];
+    const v = fn();
+    if (v instanceof Promise) {
+      return v.then(
+        v => [undefined, v],
+        e => {
+          if (e instanceof NotReadyError) throw e;
+          return [e as E];
         }
-      } else {
-        // If we didn't share any sources with the previous execution, set the sources array to newSources
-        node._sources = newSources;
-      }
-
-      // For each new source, we need to add this `node` to the source's observers array (downlinks)
-      let source: SourceType;
-      for (let i = newSourcesIndex; i < node._sources.length; i++) {
-        source = node._sources[i];
-        if (!source._observers) source._observers = [node];
-        else source._observers.push(node);
-      }
-    } else if (node._sources && newSourcesIndex < node._sources.length) {
-      // If there are no new sources, but the sources array is longer than newSourcesIndex,
-      // that means the sources array has just shrunk so we remove the tail end
-      removeSourceObservers(node, newSourcesIndex);
-      node._sources.length = newSourcesIndex;
+      );
     }
-
-    // Reset global context after computation
-    newSources = prevSources;
-    newSourcesIndex = prevSourcesIndex;
-    newFlags = prevFlags;
-
-    node._time = getClock() + 1;
-
-    // By now, we have updated the node's value and sources array, so we can mark it as clean
-    // TODO: This assumes that the computation didn't write to any signals, throw an error if it did
-    node._state = STATE_CLEAN;
+    return [undefined, v];
+  } catch (e) {
+    if (e instanceof NotReadyError) throw e;
+    return [e as E];
   }
-}
-
-function removeSourceObservers(node: ObserverType, index: number): void {
-  let source: SourceType;
-  let swap: number;
-  for (let i = index; i < node._sources!.length; i++) {
-    source = node._sources![i];
-    if (source._observers) {
-      swap = source._observers.indexOf(node);
-      source._observers[swap] = source._observers[source._observers.length - 1];
-      source._observers.pop();
-      // maybe could get overcalled?
-      if (!source._observers.length) source._unobserved?.();
-    }
-  }
-}
-
-export function isEqual<T>(a: T, b: T): boolean {
-  return a === b;
-}
-
-/**
- * Returns the current value stored inside the given compute function without triggering any
- * dependencies. Use `untrack` if you want to also disable owner tracking.
- */
-export function untrack<T>(fn: () => T): T {
-  if (currentObserver === null) return fn();
-  return compute(getOwner(), fn, null);
 }
 
 /**
@@ -532,30 +321,32 @@ export function untrack<T>(fn: () => T): T {
  * the parent computation was run.
  */
 export function hasUpdated(fn: () => any): boolean {
-  const current = updateCheck;
-  updateCheck = { _value: false };
-  try {
-    fn();
-    return updateCheck._value;
-  } finally {
-    updateCheck = current;
-  }
+  return false; // TODO: Implement hasUpdated function
+
+  // const current = updateCheck;
+  // updateCheck = { _value: false };
+  // try {
+  //   fn();
+  //   return updateCheck._value;
+  // } finally {
+  //   updateCheck = current;
+  // }
 }
 
-function pendingCheck(fn: () => any, loadingValue: boolean | undefined): boolean {
-  const current = staleCheck;
-  staleCheck = { _value: false };
-  try {
-    latest(fn);
-    return staleCheck._value;
-  } catch (err) {
-    if (!(err instanceof NotReadyError)) return false;
-    if (loadingValue !== undefined) return loadingValue!;
-    throw err;
-  } finally {
-    staleCheck = current;
-  }
-}
+// function pendingCheck(fn: () => any, loadingValue: boolean | undefined): boolean {
+//   const current = staleCheck;
+//   staleCheck = { _value: false };
+//   try {
+//     latest(fn);
+//     return staleCheck._value;
+//   } catch (err) {
+//     if (!(err instanceof NotReadyError)) return false;
+//     if (loadingValue !== undefined) return loadingValue!;
+//     throw err;
+//   } finally {
+//     staleCheck = current;
+//   }
+// }
 
 /**
  * Returns an accessor that is true if the given function contains async signals that are out of date.
@@ -563,10 +354,12 @@ function pendingCheck(fn: () => any, loadingValue: boolean | undefined): boolean
 export function isPending(fn: () => any): boolean;
 export function isPending(fn: () => any, loadingValue: boolean): boolean;
 export function isPending(fn: () => any, loadingValue?: boolean): boolean {
-  if (!currentObserver) return pendingCheck(fn, loadingValue);
-  const c = new Computation(undefined, () => pendingCheck(fn, loadingValue));
-  c._handlerMask |= LOADING_BIT;
-  return c.read();
+  return false; // TODO: Implement isPending function
+
+  // if (!currentObserver) return pendingCheck(fn, loadingValue);
+  // const c = new Computation(undefined, () => pendingCheck(fn, loadingValue));
+  // c._handlerMask |= LOADING_BIT;
+  // return c.read();
 }
 
 /**
@@ -575,107 +368,19 @@ export function isPending(fn: () => any, loadingValue?: boolean): boolean {
 export function latest<T>(fn: () => T): T;
 export function latest<T, U>(fn: () => T, fallback: U): T | U;
 export function latest<T, U>(fn: () => T, fallback?: U): T | U {
-  const argLength = arguments.length;
-  const prevFlags = newFlags;
-  const prevNotStale = notStale;
-  notStale = false;
-  try {
-    return fn();
-  } catch (err) {
-    if (argLength > 1 && err instanceof NotReadyError) return fallback as U;
-    throw err;
-  } finally {
-    newFlags = prevFlags;
-    notStale = prevNotStale;
-  }
-}
+  return {} as any; // TODO: Implement latest function
 
-/**
- * Runs the given function in the given observer.
- *
- * Warning: Usually there are simpler ways of modeling a problem that avoid using this function
- */
-export function runWithObserver<T>(observer: Computation, run: () => T): T | undefined {
-  const prevSources = newSources,
-    prevSourcesIndex = newSourcesIndex,
-    prevFlags = newFlags;
-
-  newSources = null as Computation[] | null;
-  newSourcesIndex = observer._sources ? observer._sources.length : 0;
-  newFlags = 0;
-
-  try {
-    return compute(observer, run, observer);
-  } catch (error) {
-    if (error instanceof NotReadyError) {
-      observer.write(
-        UNCHANGED,
-        newFlags | LOADING_BIT | (observer._stateFlags & UNINITIALIZED_BIT)
-      );
-    } else {
-      observer._setError(error);
-    }
-  } finally {
-    if (newSources) {
-      // First we update our own sources array (uplinks)
-      if (newSourcesIndex > 0) {
-        // If we shared some sources with the previous execution, we need to copy those over to the
-        // new sources array
-
-        // First we need to make sure the sources array is long enough to hold all the new sources
-        observer._sources!.length = newSourcesIndex + newSources.length;
-
-        // Then we copy the new sources over
-        for (let i = 0; i < newSources.length; i++) {
-          observer._sources![newSourcesIndex + i] = newSources[i];
-        }
-      } else {
-        // If we didn't share any sources with the previous execution, set the sources array to newSources
-        observer._sources = newSources;
-      }
-
-      // For each new source, we need to add this `node` to the source's observers array (downlinks)
-      let source: SourceType;
-      for (let i = newSourcesIndex; i < observer._sources!.length; i++) {
-        source = observer._sources![i];
-        if (!source._observers) source._observers = [observer];
-        else source._observers.push(observer);
-      }
-    }
-
-    // Reset global context after computation
-    newSources = prevSources;
-    newSourcesIndex = prevSourcesIndex;
-    newFlags = prevFlags;
-  }
-}
-
-/**
- * A convenient wrapper that calls `compute` with the `owner` and `observer` and is guaranteed
- * to reset the global context after the computation is finished even if an error is thrown.
- */
-export function compute<T>(owner: Owner | null, fn: (val: T) => T, observer: Computation<T>): T;
-export function compute<T>(owner: Owner | null, fn: (val: undefined) => T, observer: null): T;
-export function compute<T>(
-  owner: Owner | null,
-  fn: (val?: T) => T,
-  observer: Computation<T> | null
-): T {
-  const prevOwner = setOwner(owner),
-    prevObserver = currentObserver,
-    prevMask = currentMask,
-    prevNotStale = notStale;
-
-  currentObserver = observer;
-  currentMask = observer?._handlerMask ?? DEFAULT_FLAGS;
-  notStale = true;
-
-  try {
-    return fn(observer ? observer._value : undefined);
-  } finally {
-    setOwner(prevOwner);
-    currentObserver = prevObserver;
-    currentMask = prevMask;
-    notStale = prevNotStale;
-  }
+  // const argLength = arguments.length;
+  // const prevFlags = newFlags;
+  // const prevNotStale = notStale;
+  // notStale = false;
+  // try {
+  //   return fn();
+  // } catch (err) {
+  //   if (argLength > 1 && err instanceof NotReadyError) return fallback as U;
+  //   throw err;
+  // } finally {
+  //   newFlags = prevFlags;
+  //   notStale = prevNotStale;
+  // }
 }

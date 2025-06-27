@@ -1,6 +1,4 @@
-import { Computation, compute, Owner } from "./core/index.js";
-import { runWithOwner } from "./signals.js";
-import type { Accessor } from "./signals.js";
+import { createSignal, runWithOwner, type Accessor, type Owner, type Signal } from "./core/index.js";
 import { $TRACK } from "./store/index.js";
 
 export type Maybe<T> = T | void | null | undefined | false;
@@ -43,20 +41,20 @@ function updateKeyedMap<Item, MappedItem>(this: MapData<Item, MappedItem>): any[
       j: number,
       mapper = this._rows
         ? () => {
-            this._rows![j] = new Computation(newItems[j], null);
-            this._indexes && (this._indexes![j] = new Computation(j, null));
+            this._rows![j] = createSignal(() => newItems[j]);
+            this._indexes && (this._indexes![j] = createSignal(j));
             return this._map(
-              Computation.prototype.read.bind(this._rows![j]),
+              this._rows![j][0],
               this._indexes
-                ? Computation.prototype.read.bind(this._indexes![j])
+                ? this._indexes![j][0]
                 : (undefined as any)
             );
           }
         : this._indexes
           ? () => {
               const item = newItems[j];
-              this._indexes![j] = new Computation(j, null);
-              return this._map(() => item, Computation.prototype.read.bind(this._indexes![j]));
+              this._indexes![j] = createSignal(j);
+              return this._map(() => item, this._indexes![j][0]);
             }
           : () => {
               const item = newItems[j];
@@ -312,7 +310,7 @@ interface MapData<Item = any, MappedItem = any> {
   _nodes: Owner[];
   _map: (value: Accessor<any>, index: Accessor<number>) => any;
   _key: ((i: any) => any) | undefined;
-  _rows?: Computation<Item>[];
-  _indexes?: Computation<number>[];
+  _rows?: Signal<Item>[];
+  _indexes?: Signal<number>[];
   _fallback?: Accessor<any>;
 }

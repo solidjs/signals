@@ -1,154 +1,78 @@
-/**
- * Owner tracking is used to enable nested tracking scopes with automatic cleanup.
- * We also use owners to also keep track of which error handling context we are in.
- *
- * If you write the following
- *
- *   const a = createOwner(() => {
- *     const b = createOwner(() => {});
- *
- *     const c = createOwner(() => {
- *       const d = createOwner(() => {});
- *     });
- *
- *     const e = createOwner(() => {});
- *   });
- *
- * The owner tree will look like this:
- *
- *    a
- *   /|\
- *  b-c-e
- *    |
- *    d
- *
- * Following the _nextSibling pointers of each owner will first give you its children, and then its siblings (in reverse).
- * a -> e -> c -> d -> b
- *
- * Note that the owner tree is largely orthogonal to the reactivity tree, and is much closer to the component tree.
- */
-
-import { STATE_CLEAN, STATE_DISPOSED } from "./constants.js";
-import type { Computation } from "./core.js";
 import { ContextNotFoundError, NoOwnerError } from "./error.js";
+import { dispose, getContext as getR3Owner, getTracking, runWithContext, untrack, type Computed, type Owner as R3Owner } from "./r3.js";
 import { globalQueue, type IQueue } from "./scheduler.js";
 
-export type ContextRecord = Record<string | symbol, unknown>;
-
-export interface Disposable {
-  (): void;
-}
-
-let currentOwner: Owner | null = null,
-  defaultContext = {};
-
-/**
- * Returns the currently executing parent owner.
- */
-export function getOwner(): Owner | null {
-  return currentOwner;
-}
-
-export function setOwner(owner: Owner | null): Owner | null {
-  const out = currentOwner;
-  currentOwner = owner;
-  return out;
-}
-
-export class Owner {
-  // We flatten the owner tree into a linked list so that we don't need a pointer to .firstChild
-  // However, the children are actually added in reverse creation order
-  // See comment at the top of the file for an example of the _nextSibling traversal
-  _parent: Owner | null = null;
-  _nextSibling: Owner | null = null;
-  _prevSibling: Owner | null = null;
-
-  _state: number = STATE_CLEAN;
-
-  _disposal: Disposable | Disposable[] | null = null;
-  _context: ContextRecord = defaultContext;
-  _queue: IQueue = globalQueue;
-
-  _childCount: number = 0;
-  id: string | null = null;
-
-  constructor(id: string | null = null, skipAppend = false) {
-    this.id = id;
-    if (currentOwner) {
-      !skipAppend && currentOwner.append(this);
-    }
-  }
-
-  append(child: Owner): void {
-    child._parent = this;
-    child._prevSibling = this;
-
-    if (this._nextSibling) this._nextSibling._prevSibling = child;
-    child._nextSibling = this._nextSibling;
-    this._nextSibling = child;
-
-    if (this.id != null && child.id == null) child.id = this.getNextChildId();
-    if (child._context !== this._context) {
-      child._context = { ...this._context, ...child._context };
-    }
-
-    if (this._queue) child._queue = this._queue;
-  }
-
-  dispose(this: Owner, self = true): void {
-    if (this._state === STATE_DISPOSED) return;
-
-    let head = self ? this._prevSibling || this._parent : this,
-      current = this._nextSibling,
-      next: Computation | null = null;
-
-    while (current && current._parent === this) {
-      current.dispose(true);
-      current._disposeNode();
-      next = current._nextSibling as Computation | null;
-      current._nextSibling = null;
-      current = next;
-    }
-
-    this._childCount = 0;
-    if (self) this._disposeNode();
-    if (current) current._prevSibling = !self ? this : this._prevSibling;
-    if (head) head._nextSibling = current;
-  }
-
-  _disposeNode(): void {
-    if (this._prevSibling) this._prevSibling._nextSibling = null;
-    this._parent = null;
-    this._prevSibling = null;
-    this._context = defaultContext;
-    this._state = STATE_DISPOSED;
-    this.emptyDisposal();
-  }
-
-  emptyDisposal(): void {
-    if (!this._disposal) return;
-
-    if (Array.isArray(this._disposal)) {
-      for (let i = 0; i < this._disposal.length; i++) {
-        const callable = this._disposal[i];
-        callable.call(callable);
-      }
-    } else {
-      this._disposal.call(this._disposal);
-    }
-
-    this._disposal = null;
-  }
-
-  getNextChildId(): string {
-    if (this.id != null) return formatId(this.id, this._childCount++);
-    throw new Error("Cannot get child id from owner without an id");
-  }
+export interface Owner extends R3Owner {
+  id: string | undefined;
+  _context: Record<symbol, unknown>;
+  _childCount: number;
+  _queue: IQueue;
 }
 
 export interface Context<T> {
   readonly id: symbol;
   readonly defaultValue: T | undefined;
+}
+
+export type ContextRecord = Record<string | symbol, unknown>;
+
+/**
+ * Creates a new non-tracked reactive context with manual disposal
+ *
+ * @param fn a function in which the reactive state is scoped
+ * @returns the output of `fn`.
+ *
+ * @description https://docs.solidjs.com/reference/reactive-utilities/create-root
+ */
+export function createRoot<T>(
+  init: ((dispose: () => void) => T) | (() => T),
+  options?: { id: string }
+): T {
+  const parent = getOwner();
+  const owner = {
+    id: options?.id ?? (parent?.id ? getNextChildId(parent) : undefined),
+    _queue: parent?._queue ?? globalQueue,
+    _context: parent?._context,
+    _childCount: 0
+  } as Computed<T> & Owner;
+
+  if (parent) {
+    const lastChild = parent.firstChild;
+    if (lastChild === null) {
+      parent.firstChild = owner;
+    } else {
+      owner.nextSibling = lastChild;
+      parent.firstChild = owner;
+    }
+  }
+  return runWithOwner(owner, !init.length ? (init as () => T) : () => init(() => dispose(owner)));
+}
+
+export function getObserver(): Owner | null {
+  return getTracking() ? getOwner() : null;
+}
+
+export function getOwner(): Owner | null {
+  return getR3Owner() as Owner | null;
+}
+
+/**
+ * Runs the given function in the given owner to move ownership of nested primitives and cleanups.
+ * This method untracks the current scope.
+ *
+ * Warning: Usually there are simpler ways of modeling a problem that avoid using this function
+ */
+export function runWithOwner<T>(owner: Owner, fn: () => T): T {
+  return runWithContext(owner as Computed<T> & Owner, () => untrack(fn));
+}
+
+/**
+ * Runs the given function in the given observer.
+ *
+ * Warning: Usually there are simpler ways of modeling a problem that avoid using this function
+ */
+export function runWithObserver<T>(observer: Owner, fn: () => T): T | undefined {
+  return runWithContext(observer as Computed<T> & Owner, fn)
 }
 
 /**
@@ -169,7 +93,7 @@ export function createContext<T>(defaultValue?: T, description?: string): Contex
  * @throws `NoOwnerError` if there's no owner at the time of call.
  * @throws `ContextNotFoundError` if a context value has not been set yet.
  */
-export function getContext<T>(context: Context<T>, owner: Owner | null = currentOwner): T {
+export function getContext<T>(context: Context<T>, owner: Owner | null = getOwner()): T {
   if (!owner) {
     throw new NoOwnerError();
   }
@@ -190,7 +114,7 @@ export function getContext<T>(context: Context<T>, owner: Owner | null = current
  *
  * @throws `NoOwnerError` if there's no owner at the time of call.
  */
-export function setContext<T>(context: Context<T>, value?: T, owner: Owner | null = currentOwner) {
+export function setContext<T>(context: Context<T>, value?: T, owner: Owner | null = getOwner()) {
   if (!owner) {
     throw new NoOwnerError();
   }
@@ -203,42 +127,21 @@ export function setContext<T>(context: Context<T>, value?: T, owner: Owner | nul
   };
 }
 
-/**
- * Whether the given context is currently defined.
- */
-export function hasContext(context: Context<any>, owner: Owner | null = currentOwner): boolean {
+function hasContext(context: Context<any>, owner: Owner): boolean {
   return !isUndefined(owner?._context[context.id]);
 }
 
-/**
- * Runs an effect once before the reactive scope is disposed
- * @param fn an effect that should run only once on cleanup
- *
- * @returns the same {@link fn} function that was passed in
- *
- * @description https://docs.solidjs.com/reference/lifecycle/on-cleanup
- */
-export function onCleanup(fn: Disposable): Disposable {
-  if (!currentOwner) return fn;
+function isUndefined(value: any): value is undefined {
+  return typeof value === "undefined";
+}
 
-  const node = currentOwner;
-
-  if (!node._disposal) {
-    node._disposal = fn;
-  } else if (Array.isArray(node._disposal)) {
-    node._disposal.push(fn);
-  } else {
-    node._disposal = [node._disposal, fn];
-  }
-  return fn;
+export function getNextChildId(owner: Owner): string {
+  if (owner.id != null) return formatId(owner.id, owner._childCount++);
+  throw new Error("Cannot get child id from owner without an id");
 }
 
 function formatId(prefix: string, id: number) {
   const num = id.toString(36),
     len = num.length - 1;
   return prefix + (len ? String.fromCharCode(64 + len) : "") + num;
-}
-
-function isUndefined(value: any): value is undefined {
-  return typeof value === "undefined";
 }

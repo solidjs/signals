@@ -1,184 +1,72 @@
-import {
-  EFFECT_PURE,
-  EFFECT_RENDER,
-  EFFECT_USER,
-  STATE_CHECK,
-  STATE_CLEAN,
-  STATE_DIRTY,
-  STATE_DISPOSED
-} from "./constants.js";
-import { Computation, latest, UNCHANGED, type SignalOptions } from "./core.js";
-import { EffectError } from "./error.js";
-import { ERROR_BIT, LOADING_BIT } from "./flags.js";
+import { EFFECT_RENDER, EFFECT_USER } from "./constants.js";
+import { latest, type SignalOptions } from "./core.js";
+import { ERROR_BIT } from "./flags.js";
 import type { Owner } from "./owner.js";
-import { getClock } from "./scheduler.js";
+import { computed, isEqual, onCleanup, type Computed } from "./r3.js";
+import { getClock, globalQueue } from "./scheduler.js";
+
+interface Effect<T> extends Computed<T>, Owner {
+  _effect: (err: unknown, val: T, prev: T | undefined) => void | (() => void);
+  _cleanup?: () => void;
+  _modified: boolean;
+  _prevValue: T | undefined;
+  _type: typeof EFFECT_RENDER | typeof EFFECT_USER;
+}
 
 /**
  * Effects are the leaf nodes of our reactive graph. When their sources change, they are
  * automatically added to the queue of effects to re-execute, which will cause them to fetch their
  * sources and recompute
  */
-export class Effect<T = any> extends Computation<T> {
-  _effect: (val: T, prev: T | undefined) => void | (() => void);
-  _onerror: ((err: unknown) => void | (() => void)) | undefined;
-  _cleanup: (() => void) | undefined;
-  _modified: boolean = false;
-  _prevValue: T | undefined;
-  _type: typeof EFFECT_RENDER | typeof EFFECT_USER;
-  constructor(
-    initialValue: T,
-    compute: (val?: T) => T,
-    effect: (val: T, prev: T | undefined) => void | (() => void),
-    error?: (err: unknown) => void | (() => void),
-    options?: SignalOptions<T> & { render?: boolean; defer?: boolean }
-  ) {
-    super(initialValue, compute, options);
-    this._effect = effect;
-    this._onerror = error;
-    this._prevValue = initialValue;
-    this._type = options?.render ? EFFECT_RENDER : EFFECT_USER;
-    if (this._type === EFFECT_RENDER) {
-      this._compute = p =>
-        getClock() > this._queue.created && !(this._stateFlags & ERROR_BIT)
-          ? latest(() => compute(p))
-          : compute(p);
-    }
-    this._updateIfNecessary();
-    !options?.defer &&
-      (this._type === EFFECT_USER
-        ? this._queue.enqueue(this._type, this._runEffect.bind(this))
-        : this._runEffect(this._type));
-    if (__DEV__ && !this._parent)
-      console.warn("Effects created outside a reactive context will never be disposed");
-  }
-
-  override write(value: T, flags = 0): T {
-    if (this._state == STATE_DIRTY) {
-      const currentFlags = this._stateFlags;
-      this._stateFlags = flags;
-      if (this._type === EFFECT_RENDER) {
-        this._queue.notify(this, LOADING_BIT | ERROR_BIT, flags);
-      }
-    }
-    if (value === UNCHANGED) return this._value as T;
-    this._value = value;
-    this._modified = true;
-
-    return value;
-  }
-
-  override _notify(state: number, skipQueue?: boolean): void {
-    if (this._state >= state || skipQueue) return;
-
-    if (this._state === STATE_CLEAN) this._queue.enqueue(this._type, this._runEffect.bind(this));
-
-    this._state = state;
-  }
-
-  override _setError(error: unknown): void {
-    this._error = error;
-    this._cleanup?.();
-    this._queue.notify(this, LOADING_BIT, 0);
-    this._stateFlags = ERROR_BIT;
-    if (this._type === EFFECT_USER) {
-      try {
-        return this._onerror
-          ? (this._cleanup = this._onerror(error) as any)
-          : console.error(new EffectError(this._effect, error));
-      } catch (e) {
-        error = e;
-      }
-    }
-    if (!this._queue.notify(this, ERROR_BIT, ERROR_BIT)) throw error;
-  }
-
-  override _disposeNode(): void {
-    if (this._state === STATE_DISPOSED) return;
-    this._effect = undefined as any;
-    this._prevValue = undefined;
-    this._onerror = undefined as any;
-    this._cleanup?.();
-    this._cleanup = undefined;
-    super._disposeNode();
-  }
-
-  _runEffect(type: number): void {
-    if (type) {
-      if (this._modified && this._state !== STATE_DISPOSED) {
-        this._cleanup?.();
-        try {
-          this._cleanup = this._effect(this._value!, this._prevValue) as any;
-        } catch (e) {
-          if (!this._queue.notify(this, ERROR_BIT, ERROR_BIT)) throw e;
-        } finally {
-          this._prevValue = this._value;
-          this._modified = false;
+export function effect<T>(
+  compute: (prev: T | undefined) => T,
+  effect: (err: unknown, val: T, prev: T | undefined) => void | (() => void),
+  initialValue?: T,
+  options?: SignalOptions<any> & { render?: boolean; defer?: boolean }
+): void {
+  let initialized = false;
+  const node = computed<T>(compute, initialValue, {
+    ...options,
+    equals: (prev, val) => {
+      const equal = isEqual(prev, val);
+      if (initialized) {
+        node._modified = !equal;
+        if (!equal) {
+          node._queue.enqueue(node._type, runEffect.bind(node));
         }
       }
-    } else this._state !== STATE_CLEAN && runTop(this);
-  }
-}
-
-function runComputation(this: Computation): void {
-  this._state !== STATE_CLEAN && runTop(this);
-}
-export class EagerComputation<T = any> extends Computation<T> {
-  constructor(initialValue: T, compute: () => T, options?: SignalOptions<T> & { defer?: boolean }) {
-    super(initialValue, compute, options);
-    !options?.defer && this._updateIfNecessary();
-    if (__DEV__ && !this._parent)
-      console.warn("Eager Computations created outside a reactive context will never be disposed");
-  }
-
-  override _notify(state: number, skipQueue?: boolean): void {
-    if (this._state >= state && !this._forceNotify) return;
-
-    if (
-      !skipQueue &&
-      (this._state === STATE_CLEAN || (this._state === STATE_CHECK && this._forceNotify))
-    )
-      this._queue.enqueue(EFFECT_PURE, runComputation.bind(this));
-
-    super._notify(state, skipQueue);
-  }
-}
-
-export class ProjectionComputation extends Computation {
-  constructor(compute: () => void) {
-    super(undefined, compute);
-    if (__DEV__ && !this._parent)
-      console.warn("Eager Computations created outside a reactive context will never be disposed");
-  }
-  _notify(state: number, skipQueue?: boolean): void {
-    if (this._state >= state && !this._forceNotify) return;
-
-    if (
-      !skipQueue &&
-      (this._state === STATE_CLEAN || (this._state === STATE_CHECK && this._forceNotify))
-    )
-      this._queue.enqueue(EFFECT_PURE, runComputation.bind(this));
-
-    super._notify(state, true);
-    this._forceNotify = !!skipQueue; // they don't need to be forced themselves unless from above
-  }
-}
-
-/**
- * When re-executing nodes, we want to be extra careful to avoid double execution of nested owners
- * In particular, it is important that we check all of our parents to see if they will rerun
- * See tests/createEffect: "should run parent effect before child effect" and "should run parent
- * memo before child effect"
- */
-function runTop(node: Computation): void {
-  const ancestors: Computation[] = [];
-
-  for (let current: Owner | null = node; current !== null; current = current._parent) {
-    if (current._state !== STATE_CLEAN) {
-      ancestors.push(current as Computation);
+      return equal;
     }
+  }) as Effect<T>;
+  initialized = true;
+  node._effect = effect;
+  node._modified = true;
+  node._prevValue = initialValue;
+  (node._queue = (node.parent as Owner)?._queue ?? globalQueue),
+    (node._type = options?.render ? EFFECT_RENDER : EFFECT_USER);
+  if (node._type === EFFECT_RENDER) {
+    node.fn = p =>
+      getClock() > node._queue.created && !node.error ? latest(() => compute(p)) : compute(p);
   }
+  !options?.defer &&
+    (node._type === EFFECT_USER
+      ? node._queue.enqueue(node._type, runEffect.bind(node))
+      : runEffect.call(node));
+  onCleanup(() => node._cleanup?.());
+  if (__DEV__ && !node.parent)
+    console.warn("Effects created outside a reactive context will never be disposed");
+}
 
-  for (let i = ancestors.length - 1; i >= 0; i--) {
-    if (ancestors[i]._state !== STATE_DISPOSED) ancestors[i]._updateIfNecessary();
+function runEffect(this: Effect<any>) {
+  if (!this._modified) return;
+  this._cleanup?.();
+  this._cleanup = undefined;
+  try {
+    this._cleanup = this._effect(this.error, this.value, this._prevValue) as any;
+  } catch (e) {
+    if (!this._queue.notify(this, ERROR_BIT, ERROR_BIT)) throw e;
+  } finally {
+    this._prevValue = this.value;
+    this._modified = false;
   }
 }
