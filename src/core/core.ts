@@ -664,8 +664,8 @@ export function setSignal<T>(el: Signal<T> | Computed<T>, v: T | ((prev: T) => T
     console.warn("A Signal was written to in an owned scope.");
 
   if (typeof v === "function") {
-    v = (v as (prev: T) => T)(
-      el._pendingValue === NOT_PENDING ? el._value : (el._pendingValue as T)
+    v = untrack(() =>
+      (v as (prev: T) => T)(el._pendingValue === NOT_PENDING ? el._value : (el._pendingValue as T))
     );
   }
   const valueChanged =
