@@ -15,9 +15,7 @@ export interface Heap {
 }
 
 export function increaseHeapSize(n: number, heap: Heap): void {
-  if (n > heap._heap.length) {
-    heap._heap.length = n;
-  }
+  heap._heap.length = Math.max(n, heap._heap.length);
 }
 
 function actualInsertIntoHeap(n: Computed<unknown>, heap: Heap) {
