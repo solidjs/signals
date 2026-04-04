@@ -174,8 +174,7 @@ export function createMemo<Next extends Prev, Init, Prev>(
   value?: Init,
   options?: MemoOptions<Next>
 ): Accessor<Next> {
-  const node = computed<Next>(compute as any, value as any, options);
-  return accessor<Next>(node);
+  return accessor<Next>(computed<Next>(compute as any, value as any, options));
 }
 
 /**
