@@ -440,29 +440,30 @@ export function finalizePureQueue(
   completingTransition: Transition | null = null,
   incomplete: boolean = false
 ) {
-  // For incomplete transitions, skip pending resolution and optimistic reversion
-  // For completing transitions or no-transition, resolve pending and revert optimistic
-  const resolvePending = !incomplete;
-  if (resolvePending) commitPendingNodes();
-  if (!incomplete) checkBoundaryChildren(globalQueue);
-  if (dirtyQueue._max >= dirtyQueue._min) runHeap(dirtyQueue, GlobalQueue._update);
-  if (resolvePending) {
-    commitPendingNodes();
-    resolveOptimisticNodes(
-      completingTransition ? completingTransition._optimisticNodes : globalQueue._optimisticNodes
-    );
-    const optimisticStores = completingTransition
-      ? completingTransition._optimisticStores
-      : globalQueue._optimisticStores;
-    if (GlobalQueue._clearOptimisticStore && optimisticStores.size) {
-      for (const store of optimisticStores) {
-        GlobalQueue._clearOptimisticStore(store);
-      }
-      optimisticStores.clear();
-      schedule();
-    }
-    cleanupCompletedLanes(completingTransition);
+  // Incomplete transitions only need to drain newly dirtied work.
+  if (incomplete) {
+    if (dirtyQueue._max >= dirtyQueue._min) runHeap(dirtyQueue, GlobalQueue._update);
+    return;
   }
+
+  commitPendingNodes();
+  checkBoundaryChildren(globalQueue);
+  if (dirtyQueue._max >= dirtyQueue._min) runHeap(dirtyQueue, GlobalQueue._update);
+  commitPendingNodes();
+  resolveOptimisticNodes(
+    completingTransition ? completingTransition._optimisticNodes : globalQueue._optimisticNodes
+  );
+  const optimisticStores = completingTransition
+    ? completingTransition._optimisticStores
+    : globalQueue._optimisticStores;
+  if (GlobalQueue._clearOptimisticStore && optimisticStores.size) {
+    for (const store of optimisticStores) {
+      GlobalQueue._clearOptimisticStore(store);
+    }
+    optimisticStores.clear();
+    schedule();
+  }
+  cleanupCompletedLanes(completingTransition);
 }
 
 function checkBoundaryChildren(queue: Queue) {

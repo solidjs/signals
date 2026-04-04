@@ -139,14 +139,10 @@ export function createSignal<T>(
   second?: T | SignalOptions<T>,
   third?: SignalOptions<T> & MemoOptions<T>
 ): Signal<T | undefined> {
-  if (typeof first === "function") {
-    const node = computed<T>(first as any, second as any, third);
-    return [
-      accessor<T | undefined>(node),
-      setSignal.bind(null, node as any) as Setter<T | undefined>
-    ];
-  }
-  const node = signal<T>(first as any, second as SignalOptions<T>);
+  const node =
+    typeof first === "function"
+      ? computed<T>(first as any, second as any, third)
+      : signal<T>(first as any, second as SignalOptions<T>);
   return [accessor<T>(node), setSignal.bind(null, node as any) as Setter<T | undefined>];
 }
 

@@ -43,30 +43,26 @@ export function link(dep: Signal<any> | Computed<any>, sub: Computed<any>) {
   const prevDep = sub._depsTail;
   if (prevDep !== null && prevDep._dep === dep) return;
 
-  let nextDep: Link | null = null;
   const isRecomputing = sub._flags & REACTIVE_RECOMPUTING_DEPS;
-  if (isRecomputing) {
-    nextDep = prevDep !== null ? prevDep._nextDep : sub._deps;
-    if (nextDep !== null && nextDep._dep === dep) {
-      sub._depsTail = nextDep;
-      return;
-    }
+  const nextDep = isRecomputing ? (prevDep !== null ? prevDep._nextDep : sub._deps) : null;
+  if (nextDep !== null && nextDep._dep === dep) {
+    sub._depsTail = nextDep;
+    return;
   }
 
   const prevSub = dep._subsTail;
   if (prevSub !== null && prevSub._sub === sub && (!isRecomputing || isValidLink(prevSub, sub)))
     return;
 
-  const newLink =
-    (sub._depsTail =
-    dep._subsTail =
-      {
-        _dep: dep,
-        _sub: sub,
-        _nextDep: nextDep,
-        _prevSub: prevSub,
-        _nextSub: null
-      });
+  const newLink = {
+    _dep: dep,
+    _sub: sub,
+    _nextDep: nextDep,
+    _prevSub: prevSub,
+    _nextSub: null
+  };
+  sub._depsTail = newLink;
+  dep._subsTail = newLink;
   if (prevDep !== null) prevDep._nextDep = newLink;
   else sub._deps = newLink;
 
