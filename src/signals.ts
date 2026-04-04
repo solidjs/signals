@@ -292,7 +292,7 @@ export function createReaction(
   options?: EffectOptions
 ) {
   const bundle = effectFn as any;
-  let cl: (() => void) | undefined = undefined;
+  let cl: (() => void) | undefined;
   cleanup(() => cl?.());
   const owner = getOwner();
   return (tracking: () => void) => {
