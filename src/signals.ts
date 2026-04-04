@@ -272,10 +272,7 @@ export function createTrackedEffect(
   compute: () => void | (() => void),
   options?: EffectOptions
 ): void {
-  trackedEffect(
-    compute,
-    __DEV__ ? { ...options, name: options?.name ?? "trackedEffect" } : options
-  );
+  trackedEffect(compute, __DEV__ ? { ...options, name: options?.name ?? "trackedEffect" } : options);
 }
 
 /**
