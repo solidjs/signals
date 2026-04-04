@@ -275,14 +275,11 @@ export class GlobalQueue extends Queue {
           this.stashQueues(stashedTransition._queueStash);
           clock++;
           scheduled = dirtyQueue._max >= dirtyQueue._min;
-          for (let i = 0; i < stashedTransition._pendingNodes.length; i++) {
-            stashedTransition._pendingNodes[i]._transition = activeTransition;
-          }
+          for (const node of stashedTransition._pendingNodes) node._transition = activeTransition;
           activeTransition = null;
           if (!stashedTransition._actions.length && stashedTransition._optimisticNodes.length) {
             stashedOptimisticReads = new Set();
-            for (let i = 0; i < stashedTransition._optimisticNodes.length; i++) {
-              const node = stashedTransition._optimisticNodes[i];
+            for (const node of stashedTransition._optimisticNodes) {
               if ((node as any)._fn || node._pureWrite) continue;
               stashedOptimisticReads.add(node);
               queueStashedOptimisticEffects(node);
@@ -301,9 +298,7 @@ export class GlobalQueue extends Queue {
         transitions.delete(activeTransition);
         const completingTransition = activeTransition;
         activeTransition = null;
-        for (let i = 0; i < this._pendingNodes.length; i++) {
-          this._pendingNodes[i]._transition = activeTransition;
-        }
+        for (const node of this._pendingNodes) node._transition = activeTransition;
         finalizePureQueue(completingTransition);
       } else {
         if (transitions.size) runHeap(zombieQueue, GlobalQueue._update);
@@ -361,16 +356,14 @@ export class GlobalQueue extends Queue {
     transitions.add(activeTransition);
     activeTransition._time = clock;
     if (this._pendingNodes !== activeTransition._pendingNodes) {
-      for (let i = 0; i < this._pendingNodes.length; i++) {
-        const node = this._pendingNodes[i];
+      for (const node of this._pendingNodes) {
         node._transition = activeTransition;
         activeTransition._pendingNodes.push(node);
       }
       this._pendingNodes = activeTransition._pendingNodes;
     }
     if (this._optimisticNodes !== activeTransition._optimisticNodes) {
-      for (let i = 0; i < this._optimisticNodes.length; i++) {
-        const node = this._optimisticNodes[i];
+      for (const node of this._optimisticNodes) {
         node._transition = activeTransition;
         activeTransition._optimisticNodes.push(node);
       }
@@ -503,14 +496,12 @@ function runQueue(queue: QueueCallback[], type: number): void {
 function transitionComplete(transition: Transition): boolean {
   if (transition._done) return true;
   if (transition._actions.length) return false;
-  for (let i = 0; i < transition._asyncNodes.length; i++) {
-    const node = transition._asyncNodes[i];
+  for (const node of transition._asyncNodes) {
     if (node._statusFlags & STATUS_PENDING && (node._error as NotReadyError)?.source === node) {
       return false;
     }
   }
-  for (let i = 0; i < transition._optimisticNodes.length; i++) {
-    const node = transition._optimisticNodes[i];
+  for (const node of transition._optimisticNodes) {
     if (
       hasActiveOverride(node) &&
       "_statusFlags" in node &&
