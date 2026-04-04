@@ -25,10 +25,12 @@ Required process:
    - pnpm test
    - pnpm build
    - pnpm exec vitest bench --run tests/core/reactivity.bench.ts
+   - pnpm run research:simplicity
 4. Evaluate the result with this keep/discard rule:
    - discard if tests fail
    - discard if build fails
    - discard if the benchmark shows a meaningful regression
+   - discard if `pnpm run research:simplicity` does not report a positive heuristic score
    - discard if the result is not clearly simpler
    - keep only if the change is small, behavior-preserving, and obviously simpler
 5. Make a clean descriptive git commit describing the simplification made and why
@@ -40,5 +42,5 @@ Use `research/simplicity.md` as the simplicity scoring rubric when deciding whet
 Output:
 - a brief description of the simplification you chose
 - the exact files changed
-- test/build/bench results
+- test/build/bench/simplicity results
 - a final keep-or-discard recommendation with a short reason focused on simplicity
