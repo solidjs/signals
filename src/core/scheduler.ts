@@ -324,21 +324,19 @@ export class GlobalQueue extends Queue {
   }
   notify(node: Computed<any>, mask: number, flags: number, error?: any): boolean {
     // Only track async if the boundary is propagating STATUS_PENDING (not caught by boundary)
-    if (mask & STATUS_PENDING) {
-      if (flags & STATUS_PENDING) {
-        const actualError = error ?? node._error;
-        if (activeTransition && actualError) {
-          const source = (actualError as NotReadyError).source;
-          if (!activeTransition._asyncNodes.includes(source)) {
-            activeTransition._asyncNodes.push(source);
-            schedule();
-          }
+    if (!(mask & STATUS_PENDING)) return false;
+    if (flags & STATUS_PENDING) {
+      const actualError = error ?? node._error;
+      if (activeTransition && actualError) {
+        const source = (actualError as NotReadyError).source;
+        if (!activeTransition._asyncNodes.includes(source)) {
+          activeTransition._asyncNodes.push(source);
+          schedule();
         }
-        if (__DEV__ && _enforceLoadingBoundary) _hitUnhandledAsync = true;
       }
-      return true;
+      if (__DEV__ && _enforceLoadingBoundary) _hitUnhandledAsync = true;
     }
-    return false;
+    return true;
   }
   initTransition(transition?: Transition | null): void {
     if (transition) transition = currentTransition(transition);
@@ -501,7 +499,7 @@ export function flush(): void {
 }
 
 function runQueue(queue: QueueCallback[], type: number): void {
-  for (let i = 0; i < queue.length; i++) queue[i](type);
+  for (const callback of queue) callback(type);
 }
 
 function transitionComplete(transition: Transition): boolean {
