@@ -31,10 +31,7 @@ export function unlinkSubs(link: Link): Link | null {
 
 function unobserved(el: Computed<unknown>) {
   deleteFromHeap(el, el._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue);
-  let dep = el._deps;
-  while (dep !== null) {
-    dep = unlinkSubs(dep);
-  }
+  for (let dep = el._deps; dep !== null; dep = unlinkSubs(dep)) {}
   el._deps = null;
   disposeChildren(el, true);
 }
