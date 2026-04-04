@@ -13,18 +13,19 @@ export function unlinkSubs(link: Link): Link | null {
   if (nextSub !== null) nextSub._prevSub = prevSub;
   else dep._subsTail = prevSub;
 
-  if (prevSub !== null) prevSub._nextSub = nextSub;
-  else {
-    dep._subs = nextSub;
-    if (nextSub === null) {
-      dep._unobserved?.();
-      // No more subscribers, unwatch if computed
-      (dep as Computed<any>)._fn &&
-        !(dep as any)._preventAutoDisposal &&
-        !((dep as Computed<any>)._flags & REACTIVE_ZOMBIE) &&
-        unobserved(dep as Computed<any>);
-    }
+  if (prevSub !== null) {
+    prevSub._nextSub = nextSub;
+    return nextDep;
   }
+
+  dep._subs = nextSub;
+  if (nextSub !== null) return nextDep;
+  dep._unobserved?.();
+  // No more subscribers, unwatch if computed
+  (dep as Computed<any>)._fn &&
+    !(dep as any)._preventAutoDisposal &&
+    !((dep as Computed<any>)._flags & REACTIVE_ZOMBIE) &&
+    unobserved(dep as Computed<any>);
   return nextDep;
 }
 
