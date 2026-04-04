@@ -116,8 +116,7 @@ function adjustHeight(el: Computed<unknown>, heap: Heap) {
   deleteFromHeap(el, heap);
   let newHeight = el._height;
   for (let d = el._deps; d; d = d._nextDep) {
-    const dep1 = d._dep;
-    const dep = (dep1 as FirewallSignal<unknown>)._firewall || dep1;
+    const dep = (d._dep as FirewallSignal<unknown>)._firewall || d._dep;
     if ((dep as Computed<unknown>)._fn && dep._height >= newHeight) newHeight = dep._height + 1;
   }
   if (el._height !== newHeight) {
