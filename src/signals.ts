@@ -211,10 +211,11 @@ export function createEffect<Next, Init>(
   value?: Init,
   options?: EffectOptions
 ): void {
+  const bundle = effectFn as any;
   effect(
     compute as any,
-    (effectFn as any).effect || effectFn,
-    (effectFn as any).error,
+    bundle.effect || bundle,
+    bundle.error,
     value as any,
     __DEV__ ? { ...options, name: options?.name ?? "effect" } : options
   );
