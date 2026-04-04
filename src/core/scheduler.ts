@@ -272,7 +272,9 @@ export class GlobalQueue extends Queue {
           this.stashQueues(stashedTransition._queueStash);
           clock++;
           scheduled = dirtyQueue._max >= dirtyQueue._min;
-          reassignPendingTransition(stashedTransition._pendingNodes);
+          for (let i = 0; i < stashedTransition._pendingNodes.length; i++) {
+            stashedTransition._pendingNodes[i]._transition = activeTransition;
+          }
           activeTransition = null;
           if (!stashedTransition._actions.length && stashedTransition._optimisticNodes.length) {
             stashedOptimisticReads = new Set();
@@ -296,7 +298,9 @@ export class GlobalQueue extends Queue {
         transitions.delete(activeTransition);
         const completingTransition = activeTransition;
         activeTransition = null;
-        reassignPendingTransition(this._pendingNodes);
+        for (let i = 0; i < this._pendingNodes.length; i++) {
+          this._pendingNodes[i]._transition = activeTransition;
+        }
         finalizePureQueue(completingTransition);
       } else {
         if (transitions.size) runHeap(zombieQueue, GlobalQueue._update);
@@ -476,12 +480,6 @@ export function trackOptimisticStore(store: any): void {
   // After initTransition, globalQueue._optimisticStores IS activeTransition._optimisticStores (same reference)
   globalQueue._optimisticStores.add(store);
   schedule();
-}
-
-function reassignPendingTransition(pendingNodes: Signal<any>[]) {
-  for (let i = 0; i < pendingNodes.length; i++) {
-    pendingNodes[i]._transition = activeTransition;
-  }
 }
 
 export const globalQueue = new GlobalQueue();
