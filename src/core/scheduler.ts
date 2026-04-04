@@ -227,7 +227,7 @@ export class Queue implements IQueue {
     stub._queues[1].push(...this._queues[1]);
     this._queues = [[], []];
     for (let i = 0; i < this._children.length; i++) {
-      let child = this._children[i];
+      const child = this._children[i];
       const childStub = (stub._children[i] ??= { _queues: [[], []], _children: [] });
       child.stashQueues(childStub);
     }
@@ -237,7 +237,7 @@ export class Queue implements IQueue {
     this._queues[1].push(...stub._queues[1]);
     for (let i = 0; i < stub._children.length; i++) {
       const childStub = stub._children[i];
-      let child = this._children[i];
+      const child = this._children[i];
       if (child) child.restoreQueues(childStub);
     }
   }
@@ -318,7 +318,7 @@ export class GlobalQueue extends Queue {
     // Only track async if the boundary is propagating STATUS_PENDING (not caught by boundary)
     if (mask & STATUS_PENDING) {
       if (flags & STATUS_PENDING) {
-        const actualError = error !== undefined ? error : node._error;
+        const actualError = error ?? node._error;
         if (activeTransition && actualError) {
           const source = (actualError as NotReadyError).source;
           if (!activeTransition._asyncNodes.includes(source)) {

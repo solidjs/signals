@@ -178,7 +178,7 @@ export function createMemo<Next extends Prev, Init, Prev>(
   value?: Init,
   options?: MemoOptions<Next>
 ): Accessor<Next> {
-  let node = computed<Next>(compute as any, value as any, options);
+  const node = computed<Next>(compute as any, value as any, options);
   return accessor<Next>(node);
 }
 
@@ -299,6 +299,7 @@ export function createReaction(
   effectFn: EffectFunction<undefined> | EffectBundle<undefined>,
   options?: EffectOptions
 ) {
+  const bundle = effectFn as any;
   let cl: (() => void) | undefined = undefined;
   cleanup(() => cl?.());
   const owner = getOwner();
@@ -308,7 +309,7 @@ export function createReaction(
         () => (tracking(), getOwner()!),
         node => {
           cl?.();
-          const cleanup = ((effectFn as any).effect || effectFn)?.();
+          const cleanup = (bundle.effect || bundle)?.();
           if (__DEV__ && cleanup !== undefined && typeof cleanup !== "function") {
             throw new Error(
               "Reaction callback returned an invalid cleanup value. Return a cleanup function or undefined."
@@ -317,7 +318,7 @@ export function createReaction(
           cl = cleanup as (() => void) | undefined;
           dispose(node as any);
         },
-        (effectFn as any).error,
+        bundle.error,
         undefined,
         {
           defer: true,
