@@ -72,13 +72,13 @@ export function link(dep: Signal<any> | Computed<any>, sub: Computed<any>) {
 
 // https://github.com/stackblitz/alien-signals/blob/v2.0.3/src/system.ts#L284
 function isValidLink(checkLink: Link, sub: Computed<unknown>): boolean {
-  const depsTail = sub._depsTail;
-  if (depsTail === null) return false;
-  let link = sub._deps!;
-  do {
-    if (link === checkLink) return true;
-    if (link === depsTail) break;
-    link = link._nextDep!;
-  } while (link !== null);
-  return false;
+   const depsTail = sub._depsTail;
+   if (depsTail === null) return false;
+   let link = sub._deps!;
+   while (link !== null) {
+     if (link === checkLink) return true;
+     if (link === depsTail) return false;
+     link = link._nextDep!;
+   }
+   return false;
 }
