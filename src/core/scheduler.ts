@@ -508,31 +508,26 @@ function runQueue(queue: QueueCallback[], type: number): void {
 function transitionComplete(transition: Transition): boolean {
   if (transition._done) return true;
   if (transition._actions.length) return false;
-  let done = true;
   for (let i = 0; i < transition._asyncNodes.length; i++) {
     const node = transition._asyncNodes[i];
     if (node._statusFlags & STATUS_PENDING && (node._error as NotReadyError)?.source === node) {
-      done = false;
-      break;
+      return false;
     }
   }
-  if (done) {
-    for (let i = 0; i < transition._optimisticNodes.length; i++) {
-      const node = transition._optimisticNodes[i];
-      if (
-        hasActiveOverride(node) &&
-        "_statusFlags" in node &&
-        node._statusFlags & STATUS_PENDING &&
-        node._error instanceof NotReadyError &&
-        node._error.source !== node
-      ) {
-        done = false;
-        break;
-      }
+  for (let i = 0; i < transition._optimisticNodes.length; i++) {
+    const node = transition._optimisticNodes[i];
+    if (
+      hasActiveOverride(node) &&
+      "_statusFlags" in node &&
+      node._statusFlags & STATUS_PENDING &&
+      node._error instanceof NotReadyError &&
+      node._error.source !== node
+    ) {
+      return false;
     }
   }
-  done && (transition._done = true);
-  return done;
+  transition._done = true;
+  return true;
 }
 export function currentTransition(transition: Transition) {
   while (transition._done && typeof transition._done === "object") transition = transition._done;
