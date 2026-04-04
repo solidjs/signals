@@ -74,17 +74,22 @@ function runLaneEffects(type: number): void {
   }
 }
 
+function enqueueTrackedEffect(sub: any): boolean {
+  if (sub._type === EFFECT_TRACKED) {
+    if (!sub._modified) {
+      sub._modified = true;
+      sub._queue.enqueue(EFFECT_USER, sub._run);
+    }
+    return true;
+  }
+  return false;
+}
+
 function queueStashedOptimisticEffects(node: Signal<any>): void {
   for (let s = node._subs; s !== null; s = s._nextSub) {
     const sub = s._sub as any;
     if (!sub._type) continue;
-    if (sub._type === EFFECT_TRACKED) {
-      if (!sub._modified) {
-        sub._modified = true;
-        sub._queue.enqueue(EFFECT_USER, sub._run);
-      }
-      continue;
-    }
+    if (enqueueTrackedEffect(sub)) continue;
     const queue = sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue;
     if (queue._min > sub._height) queue._min = sub._height;
     insertIntoHeap(sub, queue);
@@ -408,13 +413,7 @@ export function insertSubs(node: Signal<any> | Computed<any>, optimistic: boolea
     }
 
     // Tracked effects bypass heap, go directly to effect queue
-    if (sub._type === EFFECT_TRACKED) {
-      if (!sub._modified) {
-        sub._modified = true;
-        sub._queue.enqueue(EFFECT_USER, sub._run);
-      }
-      continue;
-    }
+    if (enqueueTrackedEffect(sub)) continue;
 
     const queue = sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue;
     if (queue._min > sub._height) queue._min = sub._height;
