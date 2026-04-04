@@ -452,17 +452,13 @@ export function finalizePureQueue(
   checkBoundaryChildren(globalQueue);
   if (dirtyQueue._max >= dirtyQueue._min) runHeap(dirtyQueue, GlobalQueue._update);
   commitPendingNodes();
-  resolveOptimisticNodes(
-    completingTransition ? completingTransition._optimisticNodes : globalQueue._optimisticNodes
-  );
-  const optimisticStores = completingTransition
-    ? completingTransition._optimisticStores
-    : globalQueue._optimisticStores;
-  if (GlobalQueue._clearOptimisticStore && optimisticStores.size) {
-    for (const store of optimisticStores) {
+  const optimisticState = completingTransition ?? globalQueue;
+  resolveOptimisticNodes(optimisticState._optimisticNodes);
+  if (GlobalQueue._clearOptimisticStore && optimisticState._optimisticStores.size) {
+    for (const store of optimisticState._optimisticStores) {
       GlobalQueue._clearOptimisticStore(store);
     }
-    optimisticStores.clear();
+    optimisticState._optimisticStores.clear();
     schedule();
   }
   cleanupCompletedLanes(completingTransition);
