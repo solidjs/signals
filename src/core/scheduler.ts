@@ -389,22 +389,21 @@ export function insertSubs(node: Signal<any> | Computed<any>, optimistic: boolea
   const hasSnapshot = (node as any)._snapshotValue !== undefined;
 
   for (let s = node._subs; s !== null; s = s._nextSub) {
-    if (hasSnapshot && (s._sub as any)._inSnapshotScope) {
-      s._sub._flags |= REACTIVE_SNAPSHOT_STALE;
+    const sub = s._sub as any;
+
+    if (hasSnapshot && sub._inSnapshotScope) {
+      sub._flags |= REACTIVE_SNAPSHOT_STALE;
       continue;
     }
 
-    if (optimistic && sourceLane) {
-      s._sub._flags |= REACTIVE_OPTIMISTIC_DIRTY;
-      assignOrMergeLane(s._sub as any, sourceLane);
-    } else if (optimistic) {
-      s._sub._flags |= REACTIVE_OPTIMISTIC_DIRTY;
+    if (optimistic) {
+      sub._flags |= REACTIVE_OPTIMISTIC_DIRTY;
+      if (sourceLane) assignOrMergeLane(sub, sourceLane);
       // No source lane means reversion - clear subscriber's lane so effects go to regular queue
-      (s._sub as any)._optimisticLane = undefined;
+      else sub._optimisticLane = undefined;
     }
 
     // Tracked effects bypass heap, go directly to effect queue
-    const sub = s._sub as any;
     if (sub._type === EFFECT_TRACKED) {
       if (!sub._modified) {
         sub._modified = true;
@@ -413,9 +412,9 @@ export function insertSubs(node: Signal<any> | Computed<any>, optimistic: boolea
       continue;
     }
 
-    const queue = s._sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue;
-    if (queue._min > s._sub._height) queue._min = s._sub._height;
-    insertIntoHeap(s._sub, queue);
+    const queue = sub._flags & REACTIVE_ZOMBIE ? zombieQueue : dirtyQueue;
+    if (queue._min > sub._height) queue._min = sub._height;
+    insertIntoHeap(sub, queue);
   }
 }
 
