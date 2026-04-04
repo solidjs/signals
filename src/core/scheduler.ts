@@ -134,8 +134,7 @@ function mergeTransitionState(target: Transition, outgoing: Transition): void {
 }
 
 function resolveOptimisticNodes(nodes: OptimisticNode[]): void {
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
+  for (const node of nodes) {
     node._optimisticLane = undefined;
     if (node._pendingValue !== NOT_PENDING) {
       node._value = node._pendingValue as any;
@@ -212,7 +211,7 @@ export class Queue implements IQueue {
       this._queues[type - 1] = [];
       runQueue(effects, type);
     }
-    for (let i = 0; i < this._children.length; i++) (this._children[i] as any).run?.(type);
+    for (const child of this._children) (child as any).run?.(type);
   }
   enqueue(type: number, fn: QueueCallback): void {
     if (type) {
@@ -420,8 +419,7 @@ export function insertSubs(node: Signal<any> | Computed<any>, optimistic: boolea
 
 function commitPendingNodes() {
   const pendingNodes = globalQueue._pendingNodes;
-  for (let i = 0; i < pendingNodes.length; i++) {
-    const n = pendingNodes[i];
+  for (const n of pendingNodes) {
     if (n._pendingValue !== NOT_PENDING) {
       n._value = n._pendingValue as any;
       n._pendingValue = NOT_PENDING;
